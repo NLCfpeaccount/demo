@@ -1,0 +1,7 @@
+streamlit
+llama-cpp-python
+huggingface_hub
+psutil
+pandas
+pydantic
+openpyxl
