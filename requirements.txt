@@ -1,7 +1,8 @@
-streamlit
-llama-cpp-python
 huggingface_hub
-psutil
-pandas
-pydantic
+llama-cpp-python
 openpyxl
+pandas
+psutil
+pydantic
+requests
+streamlit
