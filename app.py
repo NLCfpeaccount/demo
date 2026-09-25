@@ -7,7 +7,7 @@ from pydantic import BaseModel, ValidationError
 REPO, FILE = "Qwen/Qwen2.5-0.5B-Instruct-GGUF", "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 # Fine-tune swap-in later = change ONLY these two lines:
 # REPO, FILE = "naresh-cl/ats-student-gguf", "student-q4_k_m.gguf"
-N_CTX, N_THREADS, N_BATCH = 2048, 2, 128
+N_CTX, N_THREADS, N_BATCH = 4096, 2, 128
 MAX_CHARS, SYS_TOKENS, OUT_TOKENS = 6000, 340, 384
 DEFAULT_JD = "Seeking ML engineer: Python, PyTorch, deployment, explainability."
 
