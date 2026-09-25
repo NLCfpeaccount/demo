@@ -1,6 +1,5 @@
---extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
 streamlit
-llama-cpp-python==0.2.90
+llama-cpp-python @ https://github.com/abetlen/llama-cpp-python/releases/download/v0.2.54/llama_cpp_python-0.2.54-cp311-cp311-manylinux_2_17_x86_64.whl
 huggingface_hub
 psutil
 pydantic
