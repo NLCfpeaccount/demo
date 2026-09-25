@@ -1,5 +1,4 @@
-# Agentic ATS · Live Demo — chat-style agentic resume parser
-# Fixed config from the Feasibility Lab verdicts. Memory-disciplined for 1 GB Cloud.
+# Agentic ATS · Live Demo v2 — chat-style agentic resume parser (Cloud-hardened)
 import gc, json, os, re, time, threading
 import psutil, streamlit as st
 from pydantic import BaseModel, ValidationError
@@ -19,7 +18,7 @@ def get_secret(k):
     except Exception: return None
 def journal(**kw):
     kw["rss_mb"] = round(rss_mb(), 1)
-    print(json.dumps(kw), flush=True)          # survives Cloud OOM kills
+    print(json.dumps(kw), flush=True)              # survives Cloud kills
 
 # ---------------- A · FORM, PROMPT, PARSER ----------------
 SCHEMA_PROMPT = (
@@ -46,8 +45,8 @@ def clean_text(raw: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", raw).strip()
 
 def pdf_to_text(data: bytes) -> str:
-    import fitz                                   # lazy: text-only sessions never pay it
-    with fitz.open(stream=data, filetype="pdf") as doc:
+    import pymupdf                                  # lazy; text-only sessions never pay it
+    with pymupdf.open(stream=data, filetype="pdf") as doc:
         return "".join(p.get_text() for p in doc)
 
 def parse_json_defensive(raw: str):
@@ -56,25 +55,42 @@ def parse_json_defensive(raw: str):
     if i != -1 and j > i: s = s[i:j + 1]
     return Profile.model_validate_json(s)
 
-# ---------------- D · MODEL SERVER (one shared instance, loaded once) ----------------
+# ---------------- D · MODEL SERVER (self-healing load) ----------------
 @st.cache_resource(show_spinner="Waking the clerk — first visitor pays ~30 s…")
 def get_llm():
-    import inspect
+    import inspect, shutil
     from huggingface_hub import hf_hub_download
     from llama_cpp import Llama
-    path = hf_hub_download(REPO, FILE, token=get_secret("HF_TOKEN"))
-    kw, tag = {}, "f16 KV"
+    journal(event="pre_download", disk_free_mb=round(shutil.disk_usage("/").free / 1e6))
+    try:
+        path = hf_hub_download(REPO, FILE, token=get_secret("HF_TOKEN"))
+    except Exception as e:
+        journal(event="download_retry", err=str(e)[:200])
+        os.environ["HF_HUB_DISABLE_XET"] = "1"      # xet flaky on some Cloud egress paths
+        path = hf_hub_download(REPO, FILE, token=get_secret("HF_TOKEN"))
+    journal(event="post_download", disk_free_mb=round(shutil.disk_usage("/").free / 1e6),
+            file_mb=round(os.path.getsize(path) / 1e6))
     params = inspect.signature(Llama.__init__).parameters
-    if "cache_type_k" in params:   kw, tag = {"cache_type_k": "q8_0"}, "q8 K-cache"
-    elif "type_k" in params:       kw, tag = {"type_k": 8}, "q8 K-cache"
-    journal(event="load", kv=tag)
-    return Llama(model_path=path, n_ctx=N_CTX, n_threads=N_THREADS, n_batch=N_BATCH, verbose=False, **kw)
+    variants = []
+    if "cache_type_k" in params: variants.append({"cache_type_k": "q8_0"})
+    if "type_k" in params:       variants.append({"type_k": 8})
+    variants.append({})                              # f16 KV last-resort
+    last = None
+    for kw in variants:
+        try:
+            llm = Llama(model_path=path, n_ctx=N_CTX, n_threads=N_THREADS,
+                        n_batch=N_BATCH, verbose=False, **kw)
+            journal(event="load_ok", kv=str(kw or "f16"))
+            return llm
+        except Exception as e:
+            last = e
+            journal(event="load_retry", kv=str(kw or "f16"), err=str(e)[:200])
+    raise last
 
 if "_lock" not in st.session_state: st.session_state._lock = threading.Lock()
 LOCK = st.session_state._lock
 
 def fit_to_context(llm, text: str):
-    """Token-level trim: prompt+output can NEVER exceed n_ctx (no crash on 10-page PDFs)."""
     n = llm.n_ctx(); out = OUT_TOKENS
     toks = llm.tokenize(text.encode("utf-8"), add_bos=False, special=True)
     budget = n - SYS_TOKENS - out - 16
@@ -123,7 +139,7 @@ with st.sidebar:
                "Fine-tuned student slots in later via two constants.")
 
 st.session_state.setdefault("chat", [])
-for msg in st.session_state.chat:                       # render history (bounded)
+for msg in st.session_state.chat:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
         if msg.get("trace"):
@@ -134,34 +150,34 @@ for msg in st.session_state.chat:                       # render history (bounde
 prompt = st.chat_input("Paste resume text here, or upload a PDF and say 'parse'…")
 
 def run_agent(raw_text: str, source: str):
-    """The agentic loop with a visible trace. Returns assistant message dict."""
     trace = [f"source: {source}", f"raw chars: {len(raw_text)}"]
     text = clean_text(raw_text)[:MAX_CHARS]
     trace.append(f"cleaned+capped: {len(text)} chars")
     if not LOCK.acquire(blocking=False):
-        return {"role": "assistant",
+        return {"role": "assistant", "ok": False,
                 "content": "🧑‍💼 The clerk is serving another visitor right now — resend in a few seconds."}
     try:
         llm = get_llm()
+        trace.append("model: awake")
         prof, att, secs = extract_resume(llm, text)
         trace.append(f"extract: attempts={att}, {secs:.1f}s")
         if prof is None:
-            trace.append("validate: FAILED twice — showing raw model reply would be unsafe; ask to retry")
-            return {"role": "assistant", "trace": trace,
+            trace.append("validate: FAILED twice")
+            return {"role": "assistant", "ok": False, "trace": trace,
                     "content": "😬 The form came back invalid twice. Try a cleaner scan or paste the text instead."}
         trace.append("validate: schema OK ✅")
         score, reason = judge_candidate(llm, prof, jd)
         trace.append(f"judge: {score}/100")
         journal(event="parse", chars=len(text), att=att, score=score)
-        head = (f"### {prof.name or 'Candidate'} — **{score}/100**\n"
-                f"*{reason}*\n\n"
+        head = (f"### {prof.name or 'Candidate'} — **{score}/100**\n*{reason}*\n\n"
                 f"**Experience:** {prof.years_experience} yrs · **Education:** {prof.education}\n"
                 f"**Top skills:** {', '.join(prof.top_skills) or '—'}")
-        return {"role": "assistant", "trace": trace, "form": prof.model_dump(), "content": head}
+        return {"role": "assistant", "ok": True, "trace": trace,
+                "form": prof.model_dump(), "content": head}
     except Exception as e:
-        journal(event="error", kind=type(e).__name__)
-        return {"role": "assistant", "trace": trace,
-                "content": f"⚠️ Agent hit a snag: `{type(e).__name__}`. Nothing was stored — resend or shorten the document."}
+        journal(event="error", kind=type(e).__name__, msg=str(e)[:300])
+        return {"role": "assistant", "ok": False, "trace": trace,
+                "content": f"⚠️ Agent hit a snag: `{type(e).__name__}: {str(e)[:160]}` — nothing stored; resend to retry."}
     finally:
         LOCK.release(); gc.collect()
 
@@ -170,9 +186,9 @@ if prompt:
     if up is not None and not st.session_state.pop("parsed_current_file", False):
         data = up.read()
         raw = pdf_to_text(data) if up.name.lower().endswith(".pdf") else data.decode("utf-8", "ignore")
-        del data                                     # PDF bytes die here — only text lives on
-        st.session_state.parsed_current_file = True
+        del data                                    # PDF bytes die here; only text lives on
         reply = run_agent(raw, up.name)
+        if reply.get("ok"): st.session_state.parsed_current_file = True   # retry keeps the file on failure
     elif len(prompt) > 200:
         reply = run_agent(prompt, "pasted text")
     else:
@@ -180,5 +196,5 @@ if prompt:
                  "content": "I parse resumes! **Upload a PDF** in the sidebar and send any message, "
                             "or **paste the resume text** (200+ chars) right here."}
     st.session_state.chat.append(reply)
-    st.session_state.chat = st.session_state.chat[-12:]   # bounded history = bounded RAM
+    st.session_state.chat = st.session_state.chat[-12:]
     st.rerun()
