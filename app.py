@@ -1,6 +1,6 @@
 # Agentic ATS · Live Demo — chat-style agentic resume parser
 # Fixed config from the Feasibility Lab verdicts. Memory-disciplined for 1 GB Cloud.
-import gc, json, re, time, threading
+import gc, json, os, re, time, threading
 import psutil, streamlit as st
 from pydantic import BaseModel, ValidationError
 
