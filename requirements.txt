@@ -1,8 +1,6 @@
+streamlit
+llama-cpp-python==0.3.14
 huggingface_hub
-llama-cpp-python
-openpyxl
-pandas
 psutil
 pydantic
-requests
-streamlit
+PyMuPDF
